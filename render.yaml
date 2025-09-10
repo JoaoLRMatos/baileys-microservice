@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: whatsapp-service
+    env: node
+  rootDir: WhatsApp
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: node index.js
+
+    # Pin Node version for consistency
+    envVars:
+      - key: NODE_VERSION
+        value: 18
+      - key: FRONT_ORIGIN
+        sync: false
+      - key: WHATSAPP_ADMIN_KEY
+        sync: false
+
+    # Persist WhatsApp auth sessions
+    disk:
+      - name: baileys-auth
+        mountPath: /opt/render/project/src/baileys_auth
+        sizeGB: 1
+  healthCheckPath: /healthz
