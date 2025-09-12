@@ -73,7 +73,11 @@ async function getClient(clientId) {
       const { connection, lastDisconnect } = update;
       if (update.qr) {
         qrCodes[clientId] = update.qr;
-        devLog(`[WhatsAppManager] Novo QR gerado para ${clientId}`);
+        // Se temos um QR, a sessão NÃO está conectada; ajuste o status amigável
+        friendlyStatus[clientId] = "disconnected";
+        devLog(
+          `[WhatsAppManager] Novo QR gerado para ${clientId} (status=disconnected)`
+        );
       }
       if (connection) {
         connectionStatus[clientId] = connection;
@@ -145,6 +149,8 @@ function getQrCode(clientId) {
 }
 
 function getConnectionStatus(clientId) {
+  // Se há QR pendente, consideramos desconectado para forçar novo pareamento
+  if (qrCodes[clientId]) return "disconnected";
   if (friendlyStatus[clientId]) return friendlyStatus[clientId];
   if (connectionStatus[clientId])
     return mapFriendly(connectionStatus[clientId]);
