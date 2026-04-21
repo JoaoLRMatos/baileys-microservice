@@ -7,6 +7,8 @@ const {
   listClients,
   disconnectClient,
   cleanupInactive,
+  getWebhookGroupName,
+  setWebhookGroupName,
 } = require("../services/whatsappManager");
 
 const router = express.Router();
@@ -252,6 +254,49 @@ router.post("/send", async (req, res) => {
 });
 
 module.exports = router;
+
+// ── Webhook group name management ──
+router.get("/webhook-group", (req, res) => {
+  return res.json({ groupName: getWebhookGroupName() });
+});
+
+router.put("/webhook-group", (req, res) => {
+  const { groupName } = req.body || {};
+  if (typeof groupName !== "string") {
+    return res.status(400).json({ error: "groupName (string) obrigatório" });
+  }
+  const updated = setWebhookGroupName(groupName);
+  return res.json({ groupName: updated });
+});
+
+// ── Pairing code endpoint ──
+router.post("/pair/:clientId", async (req, res) => {
+  const { clientId } = req.params;
+  const { phoneNumber } = req.body || {};
+  if (!phoneNumber) {
+    return res.status(400).json({ error: "phoneNumber é obrigatório" });
+  }
+  try {
+    const sock = await getClient(clientId);
+    // Aguarda um pouco para o socket estabilizar se necessário
+    if (!sock.authState?.creds?.registered) {
+      const code = await sock.requestPairingCode(phoneNumber.replace(/\D/g, ""));
+      return res.json({ clientId, pairingCode: code });
+    }
+    return res.json({ clientId, status: "already_connected", message: "Já conectado." });
+  } catch (err) {
+    console.error(`[whatsappRoutes] Erro /pair para ${clientId}:`, err);
+    return res.status(500).json({ error: err?.message || "Falha ao gerar código de pareamento" });
+  }
+});
+
+// ── Disconnect/logout endpoint (sem admin key, protegido pelo proxy da API) ──
+router.post("/disconnect/:clientId", async (req, res) => {
+  const { clientId } = req.params;
+  const { forgetAuth } = req.body || {};
+  const ok = await disconnectClient(clientId, { forgetAuth: !!forgetAuth });
+  return res.json({ success: ok });
+});
 
 // Admin/gestão
 router.get("/admin/clients", requireAdmin, (req, res) => {

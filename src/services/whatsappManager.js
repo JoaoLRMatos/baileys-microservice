@@ -16,6 +16,10 @@ const friendlyStatus = {}; // connected / disconnected / connecting
 const initPromises = {}; // evita corrida de inicialização
 const lastActivity = {}; // timestamp
 
+// Grupo alvo do webhook (configurável em runtime)
+let webhookGroupName = (process.env.WEBHOOK_GROUP_NAME || "").trim().toLowerCase();
+const resolvedGroupJids = {}; // cache: groupJid -> boolean
+
 function devLog(...args) {
   if (process.env.NODE_ENV !== "production") console.log(...args);
 }
@@ -133,6 +137,105 @@ async function getClient(clientId) {
       lastActivity[clientId] = Date.now();
     });
 
+    // ── Webhook: encaminha mensagens recebidas (opt-in via WEBHOOK_URL) ──
+    const webhookUrl = process.env.WEBHOOK_URL;
+    if (webhookUrl) {
+      devLog(`[WhatsAppManager] Webhook ATIVO para ${clientId} -> ${webhookUrl}`);
+      if (webhookGroupName) {
+        devLog(`[WhatsAppManager] Filtrando apenas grupo com nome: "${webhookGroupName}"`);
+      }
+
+      sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        devLog(`[WhatsAppManager] messages.upsert event: type=${type}, count=${messages.length}`);
+        if (type !== "notify") return;
+        for (const msg of messages) {
+          try {
+            const remoteJid = msg.key.remoteJid || "";
+            devLog(`[WhatsAppManager] Msg recebida:`, JSON.stringify({
+              fromMe: msg.key.fromMe,
+              remoteJid,
+              hasConversation: !!msg.message?.conversation,
+              hasExtended: !!msg.message?.extendedTextMessage?.text,
+              messageKeys: Object.keys(msg.message || {}),
+            }));
+
+            // Ignora broadcasts e newsletters
+            if (remoteJid === "status@broadcast") continue;
+            if (remoteJid.endsWith("@newsletter")) continue;
+
+            // ── Modo grupo específico (webhookGroupName configurado) ──
+            if (webhookGroupName) {
+              if (!remoteJid.endsWith("@g.us")) {
+                devLog(`[WhatsAppManager] Ignorado (não é grupo): ${remoteJid}`);
+                continue;
+              }
+              if (!(remoteJid in resolvedGroupJids)) {
+                try {
+                  const meta = await sock.groupMetadata(remoteJid);
+                  const match = meta.subject.toLowerCase().includes(webhookGroupName);
+                  resolvedGroupJids[remoteJid] = match;
+                  devLog(`[WhatsAppManager] Grupo "${meta.subject}" (${remoteJid}) -> ${match ? "MATCH" : "ignorado"}`);
+                } catch (e) {
+                  devLog(`[WhatsAppManager] Falha metadata grupo ${remoteJid}:`, e?.message);
+                  continue;
+                }
+              }
+              if (!resolvedGroupJids[remoteJid]) continue;
+            } else {
+              // ── Modo DM/self-chat (sem webhookGroupName) ──
+              if (remoteJid.endsWith("@g.us")) continue;
+              if (msg.key.fromMe && !remoteJid.endsWith("@lid")) {
+                const ownNumber = (sock.user?.id || "").split(":")[0].split("@")[0];
+                const remoteNumber = remoteJid.split("@")[0];
+                if (ownNumber !== remoteNumber) continue;
+              }
+            }
+
+            // Extrai texto (conversa normal ou citação)
+            const text =
+              msg.message?.conversation ||
+              msg.message?.extendedTextMessage?.text ||
+              null;
+            if (!text) continue;
+
+            // Extrai identificador do remetente
+            const from = remoteJid.replace(/@.*$/, "");
+            const payload = {
+              clientId,
+              from,
+              text,
+              messageId: msg.key.id || undefined,
+              timestamp: msg.messageTimestamp
+                ? Number(msg.messageTimestamp)
+                : undefined,
+            };
+
+            devLog(
+              `[WhatsAppManager] Webhook -> ${webhookUrl}`,
+              JSON.stringify({ clientId, from: from.slice(-4).padStart(from.length, "*") })
+            );
+
+            const secret = process.env.WEBHOOK_SECRET || "";
+            await fetch(webhookUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(secret ? { "x-webhook-secret": secret } : {}),
+              },
+              body: JSON.stringify(payload),
+            });
+          } catch (err) {
+            devLog(
+              `[WhatsAppManager] Webhook falhou para ${clientId}:`,
+              err?.message || err
+            );
+          }
+        }
+      });
+    } else {
+      devLog(`[WhatsAppManager] Webhook DESATIVADO para ${clientId} (WEBHOOK_URL não definida)`);
+    }
+
     clients[clientId] = sock;
     return sock;
   })();
@@ -203,6 +306,20 @@ function cleanupInactive({ maxIdleMs = 1000 * 60 * 30 } = {}) {
   return removed;
 }
 
+function getWebhookGroupName() {
+  return webhookGroupName;
+}
+
+function setWebhookGroupName(name) {
+  webhookGroupName = (name || "").trim().toLowerCase();
+  // Limpa cache de grupos resolvidos para reavaliar
+  for (const key of Object.keys(resolvedGroupJids)) {
+    delete resolvedGroupJids[key];
+  }
+  devLog(`[WhatsAppManager] webhookGroupName atualizado para: "${webhookGroupName}"`);
+  return webhookGroupName;
+}
+
 module.exports = {
   getClient: getClient,
   getQrCode: getQrCode,
@@ -210,4 +327,6 @@ module.exports = {
   listClients: listClients,
   disconnectClient: disconnectClient,
   cleanupInactive: cleanupInactive,
+  getWebhookGroupName: getWebhookGroupName,
+  setWebhookGroupName: setWebhookGroupName,
 };
